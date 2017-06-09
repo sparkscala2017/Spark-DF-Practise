@@ -1,0 +1,423 @@
+Spark SQL: SqlContext vs HiveContext
+=========================================
+There are two ways to create context in Spark SQL:
+
+SqlContext:
+
+scala> import org.apache.spark.sql._
+scala> var sqlContext = new SQLContext(sc)
+
+HiveContext:
+
+scala> import org.apache.spark.sql.hive._
+scala> val hc = new HiveContext(sc)
+
+Though most of the code examples you see use SqlContext, you should always use HiveContext. HiveContext is a superset of SqlContext, so it can do what SQLContext can do and much more. You do not have to connect to Hive to use HiveContext.
+==========================================================================================================================
+problem: concat the two columns
+
+import sqlContext.implicits._
+
+val df = sc.parallelize(Seq(("foo", 1), ("bar", 2))).toDF("k", "v")
+df.registerTempTable("df")
+sqlContext.sql("SELECT CONCAT(k, ' ',  v) FROM df")
+
+or
+
+import org.apache.spark.sql.functions.{concat, lit}
+
+df.select(concat($"k", lit(" "), $"v"))
+
+===========================================================================================================================
+problem: add new column with a rule:
+
+val sqlContext = new SQLContext(sc)
+import sqlContext.implicits._ // for `toDF` and $""
+import org.apache.spark.sql.functions._ // for `when`
+
+val df = sc.parallelize(Seq((4, "blah", 2), (2, "", 3), (56, "foo", 3), (100, null, 5)))
+    .toDF("A", "B", "C")
+
+val newDf = df.withColumn("D", when($"B".isNull or $"B" === "", 0).otherwise(1))
+newDf.show()
+
+===============================================================================================================================================================================================================================================
+Q.What is difference between calling someRDD.collect.foreach(println) vs someRDD.foreach(println)?
+
+val cities = sc.textFile("C:/Users/PSKUMARBEHL/Desktop/us_cities.csv")
+      cities.collect.foreach(println)
+      cities.foreach(println)
+      println(cities.partitions.length)
+The two are fundamentally different.
+
+cities.collect.foreach(println)
+first does collect which brings all records in cities back to the driver and then (since it is an array) prints each line. This means you have no parallelism as you are bringing everything to the driver.
+
+cities.foreach(println)
+on the other hand is a parallel operation. It means to run the function println on each record in the cities RDD. 
+This occurs at the workers. Had you been using a real cluster (as opposed to local master), you would not be seeing the println as they occur on the worker.
+
+==============================================================================================================================================================================================================================================================================
+
+Spark - foreach Vs foreachPartitions
+
+foreach auto run the loop on many nodes.
+
+However, sometimes you want to do some operations on each node. For example, make a connection to database. 
+You can not just make a connection and pass it into the foreach function: the connection is only made on one node.
+
+So with foreachPartition, you can make a connection to database on each node before running the loop.
+
+==============================================================================================================================================================================================================================================================================
+Sometimes Parquet files pulled from other sources like Impala save String as binary. To fix that issue, add the following line right after creating SqlContext:
+
+sqlContext.setConf("spark.sql.parquet.binaryAsString","true")
+
+===================================================================================================================================================================================================================
+snappy vs LZO
+
+Two algorithms which lead the way in this approach are LZO and Snappy. So no wonder both are very popular algorithms in Big Data space. 
+Snappy is faster than LZO but has one drawback. And that is, it is not splittable. This means the file has 
+to be compressed before writing and decompressed after forming the whole file again (as opposed to block level at node).
+
+============================================================================================================================================
+sqoop import --connect jdbc:mysql://127.0.0.1/employees --username hduser --password vipassana --table departments --warehouse-dir /user/hive/warehouse --fields-terminated-by , --hive-import
+
+val depts = sc.textFile("/user/hive/warehouse/departments")
+
+scala > val hc = new org.apache.spark.sql.hive.HiveContext(sc)
+scala > import hc._
+
+case class Department(dept_no:String,dept_name:String)
+
+val departments = sc.textFile("/user/hive/warehouse/departments").map(_.split(",")).map( d =&gt; Department(d(0),d(1)))
+
+departments.registerTempTable("departments")
+
+hc.sql("select dept_no, dept_name from departments").collect.foreach(println)
+
+==========================================================================================================================
+Spark SQL: Calculating Duration – Timeformat to Date
+
+Spark SQL: Calculating Duration – Timeformat to Date
+Spark SQL does not support date type, so things like duration become tough to calculate. That said, in Spark everything is RDD. So that’s a hidden weapon which can always be used when higher level functionality is limited.
+
+Let’s take a case where we are getting two dates in String format from either a text file or Parquet file.
+
+scala&gt; val sqlContext = new org.apache.spark.sql.SQLContext(sc)
+scala&gt; import sqlContext._
+scala&gt; sqlContext.setConf("spark.sql.parquet.binaryAsString","true")
+scala&gt; val myfile = sqlContext.parquetFile("datafolder")
+scala&gt; myfile.registerTempTable("mytable")
+scala&gt;val resultsRDD =sql("select old_date, new_date from mytable")
+scala&gt;resultsRDD.foreach(println)
+[2014-01-01 10:04:00,2014-11-12 01:56:48]
+Now you obviously cannot subtract strings. But what about Timestamps? Here:
+
+scala&gt; val resultsRDD=sql("select old_date,new_date from mytable")
+Unfortunately that results in error.
+
+java.lang.RuntimeException: Type TimestampType does not support numeric operations
+
+So what’s the solution? Let’s summon the power of RDD.
+
+scala&gt;import java.sql.Timestamp
+scala&gt; val durationRDD = resultsRDD.map(e =&gt; (Timestamp.valueOf(e.getString(1)).getTime - Timestamp.valueOf(e.getString(0)).getTime))
+If you have many columns, you’ll maintain the tuple structure and would only calculate duration using the two fields.
+
+It would look something similar to:
+
+scala&gt;import java.sql.Timestamp
+scala&gt; val durationRDD = resultsRDD.map(e =&gt; (Timestamp.valueOf(e.getString(1)).getTime - Timestamp.valueOf(e.getString(0)).getTime,e.getInt(2),e.getLog(3)))
+======================================================================================================================================================================
+scala> import sqlContext = new org.apache.spark.sql.SQLContext(sc)
+scala> import sqlContext._
+scala> val parquetFile = sqlContext.parquetfile("hdfs://localhost:9000/user/hduser/people.parquet")
+scala> val jsonFile = sqlContext.jsonFile("hdfs://localhost:9000/user/hduse/people.json")
+=========================================================================================================================
+scala> case class Person(first_name:String, last_name:String, gender)
+scala> val p = sc.textFile("hdfs://localhost:9000/user/hduser/person").map(_.split("\t")).map(e =&gt; Person(e(0),e(1),e(2)))
+scala> p.registerAsTable("person")
+scala> val jsonFile = p.toJSON
+scala> val parquetFile=p.saveAsParquetFile("hdfs://localhost:9000/user/hduser/people.parquet")
+==========================================================================================================================
+case class’ limitation that it can only support 22 fields.
+==========================================================================================================================
+Let’s look at an alternative approach, i.e., specifying schema programmatically. Let’s take a simple file person.txt which has three fields: firstName, lastName and age.
+
+scala> val sqlContext = new org.apache.spark.sql.SQLContext(sc)
+scala> import sqlContext._
+scala> val person = sc.textFile("hdfs://localhost:9000/user/hduser/person")
+scala> import org.apache.spark.sql._
+scala>  val schema = StructType(Array(StructField("firstName",StringType,true),StructField("lastName",StringType,true),StructField("age",IntegerType,true)))
+scala> val rowRDD = person.map(_.split(",")).map(p =&gt; org.apache.spark.sql.Row(p(0),p(1),p(2).toInt))
+scala> val personSchemaRDD = sqlContext.applySchema(rowRDD, schema)
+scala> personSchemaRDD.registerTempTable("person")
+scala> sql("select * from person").foreach(println)
+===========================================================================================================================
+left outer join:
+
+scala> val sqlContext = new org.apache.spark.sql.SQLContext(sc)
+scala> import sqlContext._
+scala> import org.apache.spark.sql.catalyst.plans._
+
+scala> case class Dept(dept_id:String,dept_name:String)
+scala> val dept = sc.parallelize(List( ("DEPT01","Information Technology"), ("DEPT02","WHITE HOUSE"),("DEPT03","EX-PRESIDENTS OFFICE"),("DEPT04","SALES"))).map( d =&gt; Dept(d._1,d._2)).as('dept')
+
+scala> case class Emp(first_name:String,last_name:String,dept_id:String)
+scala> val emp = sc.parallelize(List( ("Rishi","Yadav","DEPT01"),("Barack","Obama","DEPT02"),("Bill","Clinton","DEPT03"))).map( e =&gt; Emp(e._1,e._2,e._3)).as('emp')
+
+scala> val alldepts = dept.join(emp,LeftOuter,Some("dept.dept_id".attr === "emp.dept_id".attr)).select("dept.dept_id".attr,'dept_name','first_name','last_name')
+scala> alldepts.foreach(println)
+scala> val alldepts = dept.join(emp,LeftOuter,Some("dept.dept_id".attr === "emp.dept_id".attr)).select("dept.dept_id".attr,'dept_name','first_name','last_name')
+scala> alldepts.foreach(println)
+
+=================================================================================================================================================================
+
+Another trend which has helped creation of Dataframes are new data formats like Avro and Parquet. These formats have schema embedded in them are getting very popular.
+
+=====================================================================================================================================================================
+The holy grail – Joins:
+
+Let us take two tables, departments and dept_manager and join the two.
+
+scala> val depts = hc.table("departments")
+scala> val dept_manager = hc.table("dept_manager")
+scala> val depts_with_manager = depts.join(dept_manager,depts.col("dept_no") === dept_manager.col("dept_no"),"left_outer")
+============================================================================================================================
+scala> val ac = sc.accumulator(0)
+scala> val words = sc.textFile("hdfs://localhost:9000/user/hduser/words").flatMap(_.split("\\W+"))
+scala> words.foreach(w => ac += 1 )
+scala> ac.value
+==============================================================================================================================
+scala> val ac = sc.accumulator(0)
+scala> val words = sc.textFile("hdfs://localhost:9000/user/hduser/words").flatMap(_.split("\\W+"))
+scala> words.foreach(w => ac += w.length )
+scala> ac.value
+===============================================================================================================================
+Following the tradition, let’s put this data in people directory
+
+Barack,Obama,53
+George,Bush,68
+Bill,Clinton,68
+
+
+scala> val ac = sc.accumulator(0)
+scala> val people = sc.textFile("people").map( v => v.split(","))
+scala> people.foreach( p => ac += p(2).toInt)
+scala> ac.value
+=====================================================================================================================================
+Now that we have done so far is sum or count both associative tasks. One common use case to use counters is to count bad records.
+
+Let’s create another dataset of people with some bad records.Let’s put it in directory baddata
+
+Barack,Obama,53
+George,Bush,68
+Hillary,Clinton,F
+Bill,Clinton,68
+Tom,Cruise,M
+
+Now our job is to calculate bad records in accumulator badRecords
+
+scala> val badRecords = sc.accumulator(0)
+scala> val baddata = sc.textFile("baddata").map(v => v.split(","))
+scala> baddata.foreach( r => { try{r(2).toInt} catch{ case e: NumberFormatException =>  badRecords += 1 }})
+scala> badRecords.value
+Unlike broadcast variables, accumulators do not need anything special to be done to be disposed of. 
+Garbage collector picks them the moment they go out of scope like any other Java Object.
+=========================================================================================================================================
+Different ways of setting AWS credentials in Spark
+To connect to S3 from Spark you need two environment variables for security credentials and they are:
+
+AWS_ACCESS_KEY
+AWS_SECRET_ACCESS_KEY
+
+There are three ways to set them up.
+
+1. In .bashrc file, add following two lines at the end. Replace these dummy values with the real values from your AWS account.
+
+export AWS_SECRET_ACCESS_KEY=ed+11LI1zsT62cPFRUmjXswWL7lEa9a5Ncm26VfC
+export AWS_ACCESS_KEY_ID=AKIAJOEX7YHFQ5OYSLIQ
+After updating .bashrc source it to refresh it.
+
+$source .bashrc
+2. you can set them up on command line.
+
+$ export AWS_SECRET_ACCESS_KEY=ed+11LI1zsT62cPFRUmjXswWL7lEa9a5Tcm25VfC
+$ export AWS_ACCESS_KEY_ID=AKIAJOEX7YHFQ5OYSLIQ
+3. You can set them up in Spark shell
+
+scala> sc.hadoopConfiguration.set("fs.s3n.awsAccessKeyId", "<your access key>")
+scala> sc.hadoopConfiguration.set("fs.s3n.awsSecretAccessKey","<your secret
+key>")
+================================================================================================================================================
+Kafka connect: connecting JDBC source using Mysql
+Notice: Confluent Platform is the trademark and property of Confluent Inc.
+
+Kafka 0.90 comes with Kafka Connect. Kafka Connect is a tool for scalably and reliably streaming data between Apache Kafka and other data systems. 
+It makes it simple to quickly define connectors that move large data sets into and out of Kafka. 
+Kafka 0.90 comes with console and file connectors. The connector which we think is going to be most useful is JDBC connector. 
+JDBC source connector is provided by Confluent and is built with Confluent platform.
+
+Assumptions:
+1. Confluent Platform is installed in /opt/confluent
+2. Mysql is installed locally with database “bigdata”
+3. There is a “Person” table in “bigdata” with following columns id,first_name,,last_name,age
+4. Configure mysql connector jar in following location
+/opt/confluent/share/java/kafka-connect-jdbc/mysql-connector-java-5.1.38-bin.jar
+5. Create quickstart-mysql.properties in /opt/confluent/etc/kafka-connect-jdbc/
+with following content
+
+name=test-mysql-jdbc-autoincrement
+connector.class=io.confluent.connect.jdbc.JdbcSourceConnector
+tasks.max=1
+connection.url=jdbc:mysql://127.0.0.1/bigdata?user=hduser&password=******
+mode=incrementing
+incrementing.column.name=id
+topic.prefix=test-mysql-jdbc-
+Steps:
+1: CD to /opt/confluent
+
+$ cd /opt/confluent
+2. Start zookeeper
+
+$ bin/zookeeper-server-start etc/kafka/zookeeper.properties &
+3. Start Kafka Broker
+
+$ bin/kafka-server-start etc/kafka/server.properties &
+4. Start Schema Registry
+
+$ bin/schema-registry-start etc/schema-registry/schema-registry.properties &
+5. Start Mysql Source
+
+$ bin/connect-standalone etc/schema-registry/connect-avro-standalone.properties etc/kafka-connect-jdbc/quickstart-mysql.properties
+6. Connect Avro console consumer
+
+ $ bin/kafka-avro-console-consumer --new-consumer --bootstrap-server localhost:9092 --topic test-mysql-jdbc-Person --from-beginning
+
+=====================================================================================================================================================
+
+Logistic Regression with Spark MLlib
+Dataset: Diabetes data from https://archive.ics.uci.edu/ml/machine-learning-databases/pima-indians-diabetes/pima-indians-diabetes.data
+
+Load it in medical_data folder in hdfs
+
+scala> import org.apache.spark.mllib.classification.LogisticRegressionWithLBFGS
+scala> import org.apache.spark.mllib.linalg.Vectors
+scala> import org.apache.spark.mllib.regression.LabeledPoint
+ 
+scala> val data = sc.textFile("medical_data")
+scala> val parsedData = data.map { line =>
+scala> val parts = line.split(",")
+scala> LabeledPoint(parts.last.toDouble,Vectors.dense(parts.take(8).map(_.toDouble))) }
+scala> parsedData first
+scala> val splits = parsedData.randomSplit(Array(0.7, 0.3), seed =11L)
+scala> val training = splits(0)
+scala> val test = splits(1)
+ 
+scala> val lr = new LogisticRegressionWithLBFGS().setIntercept(true)
+scala> val model = lr.run(training)
+scala> val predictionAndLabel = test.map(p => (model.predict(p.features), p.label))
+scala> val accuracy = 1.0 * predictionAndLabel.filter(x => x._1 == x._2).count() / test.count()
+
+================================================================================================================================================================
+Spark: Inferring schema using case classes
+To make this recipe one should know about its main ingredient and that is case classes. These are special classes in Scala and the main spice of this ingredient is that all the grunt work which is needed in Java can be done in case classes in one code line. Spark uses reflection on case classes to infer schema.
+
+Recipe for this is given below
+
+1. Start the spark shell and give it some additional memory:
+
+ $ spark-shell --driver-memory 1G
+2. Import for the implicit conversations:
+
+ scala> import sqlContext. implicits._
+3. Create a person case class:
+
+ scala> case class Person (first_name:String,last_name: String,age:Int)
+4. In another shell, create some sample data to be put in HDFS:
+
+$ mkdir person
+$ echo "Barack,Obama,53" >> person/person.txt
+$ echo "George,Bush,68" >> person/person.txt
+$ echo "Bill,Clinton,68" >> person/person.txt
+$ hdfs dfs -put person person
+5. Load the person directly as on RDD:
+
+ scala> val p = sc.textFile ("hdfs://localhost:9000/user/hduser/person")
+6. Split each line into an array of string, based on a comma, as a delimiter:
+
+ val pmap = p.map ( line => line.split (","))
+7. Convert the RDD of Array[string] into the RDD of person case objects:
+
+ scala> val personRDD = pmap.map ( p => Person (p(0), p(1), p(2). toInt))
+8. Convert the personRDD into the personDF DataFrame:
+
+ scala> val personDF = personRDD. toDF
+9. Register the personDF as a table:
+
+ scala> personDF.registerTempTable ("person")
+10. Run a SQL query against it:
+
+ scala> val people = SQL ("select * from person")
+11. Get the output values from persons:
+
+ scala> people.collect.foreach (printIn)
+======================================================================================================================================================================
+Q. how you will apply aggregate methods on dataframes.?
+
+	
+df.groupBy($"col1").min().show
+
+df.groupBy("col1").sum("col2", "col3")
+
+val exprs = df.columns.map((_ -> "mean")).toMap
+df.groupBy($"col1").agg(exprs).show()
+
+import org.apache.spark.sql.functions.sum
+
+val exprs = df.columns.map(sum(_))
+df.groupBy($"col1").agg(exprs.head, exprs.tail: _*).show()
+
+df.groupBy("col1").agg(sum("col2").alias("col2"), avg("col3").alias("col3")).show()
+
+val exprs = df.columns.map(ceil(_))
+
+df.groupBy($"col1",$"col2",$"col3").agg(exprs.head, exprs.tail: _*).show()
+
+df.groupBy($"col1",$"col2",$"col3").agg(ceil("col1"),ceil("col2"),ceil("col3")).show()
+=======================================================================================================================================================================
+
+How to read different file formats in dataframe in scala ?
+
+val people = sqlContext.read.parquet("...")  // in Scala
+
+val ageCol = people("age")  // in Scala
+
+people("age") + 10  // in Scala
+
+people.filter("age > 30")
+     .join(department, people("deptId") === department("id"))
+     .groupBy(department("name"), "gender")
+     .agg(avg(people("salary")), max(people("age")))
+
+=======================================================================================================================================================================
+How to calculate pearson correlation cofficient of two columns:
+
+ val df = sc.parallelize(Seq(
+     |   (1.0, 2.0, 1.0), (2.0, 4.0, 0.0),
+     |   (3.0, 6.0, 0.5), (4.0, 8.0, 0.2))
+     | ).toDF("col1", "col2", "col3")
+
+df.groupBy($"col1").agg(corr("col1","col2")).show()
+
+=======================================================================================================================================================================
+
+
+
+
+
+
+ 
+
+
